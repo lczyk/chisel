@@ -5,6 +5,7 @@ on:
     branches: [main]
   release:
     types: [published]
+  workflow_dispatch:
 
 env:
   SNAP_NAME: chisel
@@ -62,7 +63,7 @@ jobs:
           find chisel-rootfs/ | grep libc
 
   promote:
-    if: ${{ github.event_name == 'release' }}
+    if: ${{ github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
     name: Promote
     runs-on: ubuntu-latest
     needs: test
