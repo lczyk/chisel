@@ -200,7 +200,7 @@ func (g *pathConflictTree) insertSegments(segments []segment, segmentSlices []*s
 // explicit termination in the trie to distinguish them from parent directories
 // of other paths.
 func pathToSegments(path string) ([]segment, error) {
-	if path[0] != '/' {
+	if path == "" || path[0] != '/' {
 		return nil, errors.New("internal error: path does not start with '/'")
 	}
 	segments := []segment{rootSegment}
