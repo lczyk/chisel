@@ -282,15 +282,7 @@ func FuzzConflictTree(f *testing.F) {
 		var inputs []conflictInput
 		seen := map[string]bool{}
 		for i, fuzzPath := range []string{pathA, pathB, pathC} {
-			// Invalid utf-8 cannot reach conflict detection because the yaml
-			// parser rejects it. It would also trip on an inconsistency in
-			// strdist.GlobPath itself: its prefix/suffix fast paths compare
-			// bytes while the distance computation compares runes, and all
-			// invalid bytes decode to the same replacement rune.
-			if !utf8.ValidString(fuzzPath) {
-				continue
-			}
-			if !isValidContentPath(fuzzPath) || seen[fuzzPath] {
+			if !isSupportedFuzzPath(fuzzPath) || seen[fuzzPath] {
 				continue
 			}
 			seen[fuzzPath] = true
@@ -298,15 +290,7 @@ func FuzzConflictTree(f *testing.F) {
 			if bits&(1<<i) != 0 {
 				pkg = "pkg2"
 			}
-			kind := setup.CopyPath
-			if strings.ContainsAny(fuzzPath, "*?") {
-				kind = setup.GlobPath
-				if bits&(1<<(i+3)) != 0 && isValidGeneratePath(fuzzPath) {
-					kind = setup.GeneratePath
-				}
-			} else if strings.HasSuffix(fuzzPath, "/") {
-				kind = setup.DirPath
-			}
+			kind := derivePathKind(fuzzPath, bits&(1<<(i+3)) != 0)
 			inputs = append(inputs, conflictInput{fuzzPath, kind, pkg})
 		}
 		if len(inputs) < 2 {
@@ -360,6 +344,27 @@ func isValidContentPath(contPath string) bool {
 	return path.IsAbs(contPath) && path.Clean(contPath) == comparePath
 }
 
+// isSupportedFuzzPath restricts the differential fuzzing to paths where the
+// whole-path strdist.GlobPath reference is trustworthy. Besides the content
+// path validation from yaml.go it excludes:
+//
+//   - Invalid utf-8. It cannot reach conflict detection because the yaml
+//     parser rejects it, and it trips an inconsistency in strdist.GlobPath
+//     itself: the prefix/suffix fast paths compare bytes while the distance
+//     computation compares runes, and all invalid bytes decode to the same
+//     replacement rune.
+//   - The rune U+2051 (two asterisks aligned vertically), which
+//     strdist.GlobPath uses internally as the replacement token for "**" and
+//     therefore treats as a wildcard even in otherwise literal paths. For
+//     such paths the tree genuinely diverges from whole-path GlobPath:
+//     literal segments are compared with ==, which treats U+2051 as the
+//     literal character.
+func isSupportedFuzzPath(contPath string) bool {
+	return utf8.ValidString(contPath) &&
+		!strings.ContainsRune(contPath, '\u2051') &&
+		isValidContentPath(contPath)
+}
+
 // isValidGeneratePath mirrors validateGeneratePath in yaml.go.
 func isValidGeneratePath(contPath string) bool {
 	if !strings.HasSuffix(contPath, "/**") {
@@ -367,6 +372,196 @@ func isValidGeneratePath(contPath string) bool {
 	}
 	dirPath := strings.TrimSuffix(contPath, "**")
 	return !strings.ContainsAny(dirPath, "*?")
+}
+
+// derivePathKind returns a path kind that yaml parsing could assign to the
+// path: wildcard paths are GlobPath, or GeneratePath when generate is set and
+// the path allows it. Directory-shaped paths are taken to have make:true.
+func derivePathKind(contPath string, generate bool) setup.PathKind {
+	switch {
+	case strings.ContainsAny(contPath, "*?"):
+		if generate && isValidGeneratePath(contPath) {
+			return setup.GeneratePath
+		}
+		return setup.GlobPath
+	case strings.HasSuffix(contPath, "/"):
+		return setup.DirPath
+	default:
+		return setup.CopyPath
+	}
+}
+
+// FuzzConflictTreeMany extends FuzzConflictTree to an arbitrary number of
+// paths (one per line of the blob argument, capped at 8) with several slices
+// allowed to share a path, per-slice path kinds on wildcard-free paths, and
+// additionally checks the structure of the built tree when no conflict is
+// found.
+func FuzzConflictTreeMany(f *testing.F) {
+	f.Add("/a/*\n/a/*/b\n/a/bar/b\n/a/\n/a/b", uint16(0b10101), uint16(0), uint16(0))
+	f.Add("/path/**\n/path/subdir/**\n/path/subdir/f*\n/path/subdir/file", uint16(0b0110), uint16(0b0011), uint16(0))
+	f.Add("/a/b\n/a/b\n/a/*\n/a/*\n/a/", uint16(0b01010), uint16(0), uint16(0b01_00_00_00_01))
+	f.Add("/a/**/\n/a/b/\n/a/b/c\n/a/**", uint16(0b1001), uint16(0b1000), uint16(0))
+	f.Add("/etc/foo/\n/etc/foo/**\n/etc/foo/bar", uint16(0), uint16(0), uint16(0))
+	f.Fuzz(func(t *testing.T, blob string, pkgBits uint16, genBits uint16, kindBits uint16) {
+		const maxPaths = 8
+		wildcardKinds := map[string]setup.PathKind{}
+		seenPath := map[string]bool{}
+		pathToSlices := map[string][]*setup.Slice{}
+		var paths []string
+		i := 0
+		for _, fuzzPath := range strings.Split(blob, "\n") {
+			if i >= maxPaths {
+				break
+			}
+			if !isSupportedFuzzPath(fuzzPath) {
+				continue
+			}
+			pkg := "pkg1"
+			if pkgBits&(1<<i) != 0 {
+				pkg = "pkg2"
+			}
+			var kind setup.PathKind
+			if strings.ContainsAny(fuzzPath, "*?") {
+				// Wildcard paths cannot use "prefer", so same-path contents
+				// must be equal (validated before conflict detection runs,
+				// see Release.validate) and the kind is fixed by the first
+				// slice that has the path.
+				var ok bool
+				kind, ok = wildcardKinds[fuzzPath]
+				if !ok {
+					kind = derivePathKind(fuzzPath, genBits&(1<<i) != 0)
+					wildcardKinds[fuzzPath] = kind
+				}
+			} else if strings.HasSuffix(fuzzPath, "/") {
+				// A directory-shaped entry is CopyPath unless it has
+				// make:true. Through "prefer", slices sharing a path may
+				// disagree on the kind, so it is chosen per slice.
+				kind = setup.CopyPath
+				if kindBits>>(2*i)&1 != 0 {
+					kind = setup.DirPath
+				}
+			} else {
+				switch kindBits >> (2 * i) & 3 {
+				case 1:
+					kind = setup.TextPath
+				case 2:
+					kind = setup.SymlinkPath
+				default:
+					kind = setup.CopyPath
+				}
+			}
+			if !seenPath[fuzzPath] {
+				seenPath[fuzzPath] = true
+				paths = append(paths, fuzzPath)
+			}
+			slice := &setup.Slice{
+				Package:  pkg,
+				Name:     fmt.Sprintf("slice%d", i),
+				Contents: map[string]setup.PathInfo{fuzzPath: {Kind: kind}},
+			}
+			pathToSlices[fuzzPath] = append(pathToSlices[fuzzPath], slice)
+			i++
+		}
+		if len(paths) < 2 {
+			t.Skip("fewer than two valid distinct paths")
+		}
+
+		// Reference implementation: check every slice pair on distinct
+		// paths. Slices sharing a path are never compared here because
+		// identical paths are validated separately before conflict detection
+		// runs.
+		globOrCopy := func(kind setup.PathKind) bool {
+			return kind == setup.GlobPath || kind == setup.CopyPath
+		}
+		wantConflict := false
+		for i := 0; i < len(paths) && !wantConflict; i++ {
+			for j := i + 1; j < len(paths) && !wantConflict; j++ {
+				if !strdist.GlobPath(paths[i], paths[j]) {
+					continue
+				}
+				for _, a := range pathToSlices[paths[i]] {
+					for _, b := range pathToSlices[paths[j]] {
+						skip := a.Package == b.Package &&
+							globOrCopy(a.Contents[paths[i]].Kind) &&
+							globOrCopy(b.Contents[paths[j]].Kind)
+						if !skip {
+							wantConflict = true
+						}
+					}
+				}
+			}
+		}
+
+		tree := setup.NewConflictTree(pathToSlices)
+		err := tree.HasConflict()
+		if gotConflict := err != nil; gotConflict != wantConflict {
+			t.Fatalf("conflict mismatch: tree=%v reference=%v (err=%v)\npaths: %q",
+				gotConflict, wantConflict, err, paths)
+		}
+		if err == nil {
+			// On conflict the tree is left partially built, but on success
+			// it must hold every path.
+			assertTreeInvariants(t, tree, pathToSlices)
+		}
+	})
+}
+
+// assertTreeInvariants checks the structure of a fully built conflict tree:
+// every inserted path is reachable through its segment chain with each of
+// its slices present on every node of the chain, the final segment's node is
+// childless, and every node is consistent with its segment text.
+func assertTreeInvariants(t *testing.T, tree setup.PathConflictTree, pathToSlices map[string][]*setup.Slice) {
+	for fuzzPath, pathSlices := range pathToSlices {
+		segments, err := setup.PathToSegments(fuzzPath)
+		if err != nil {
+			t.Fatalf("path %q: %v", fuzzPath, err)
+		}
+		node := tree.Root
+		if node.Segment != segments[0] {
+			t.Fatalf("root segment is %#v", node.Segment)
+		}
+		for _, seg := range segments[1:] {
+			child, ok := node.Children[seg.Text]
+			if !ok {
+				t.Fatalf("path %q: no node for segment %q", fuzzPath, seg.Text)
+			}
+			if child.Segment != seg {
+				t.Fatalf("path %q: node segment %#v differs from %#v", fuzzPath, child.Segment, seg)
+			}
+			for _, slice := range pathSlices {
+				found := slices.ContainsFunc(child.SegmentSlices, func(ss *setup.PathSegmentSlice) bool {
+					return ss.Slice == slice && ss.WholePath == fuzzPath
+				})
+				if !found {
+					t.Fatalf("path %q: slice %s missing on node %q", fuzzPath, slice, seg.Text)
+				}
+			}
+			node = child
+		}
+		if len(node.Children) > 0 {
+			t.Fatalf("path %q: final node %q has children", fuzzPath, node.Segment.Text)
+		}
+	}
+	assertNodeInvariants(t, tree.Root)
+}
+
+func assertNodeInvariants(t *testing.T, node *setup.PathNode) {
+	text := node.Segment.Text
+	if node.Segment.HasGlob != strings.ContainsAny(text, "*?") {
+		t.Fatalf("node %q has inconsistent HasGlob %v", text, node.Segment.HasGlob)
+	}
+	if node.Segment.HasDoubleGlob != strings.Contains(text, "**") {
+		t.Fatalf("node %q has inconsistent HasDoubleGlob %v", text, node.Segment.HasDoubleGlob)
+	}
+	for _, child := range node.Children {
+		if !strings.HasSuffix(text, "/") {
+			t.Fatalf("node %q has children but no trailing '/'", text)
+		}
+		if len(child.SegmentSlices) == 0 {
+			t.Fatalf("node %q has no slices", child.Segment.Text)
+		}
+		assertNodeInvariants(t, child)
+	}
 }
 
 // benchmarkPaths returns a conflict-free path map shaped like a real release:
