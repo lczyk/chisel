@@ -440,6 +440,27 @@ var extractTests = []extractTest{{
 	},
 	notCreated: []string{},
 }, {
+	summary: "Hard link to a hard link",
+	pkgdata: testutil.MustMakeDeb([]testutil.TarEntry{
+		testutil.Dir(0755, "./"),
+		testutil.Reg(0644, "./file", "foo"),
+		testutil.Hrd(0644, "./hardlink1", "./file"),
+		testutil.Hrd(0644, "./hardlink2", "./hardlink1"),
+	}),
+	options: tarball.ExtractOptions{
+		Extract: map[string][]tarball.ExtractInfo{
+			"/**": []tarball.ExtractInfo{{
+				Path: "/**",
+			}},
+		},
+	},
+	result: map[string]string{
+		"/file":      "file 0644 2c26b46b <1>",
+		"/hardlink1": "file 0644 2c26b46b <1>",
+		"/hardlink2": "file 0644 2c26b46b <1>",
+	},
+	notCreated: []string{},
+}, {
 	summary: "Explicit extraction overrides existing file",
 	pkgdata: testutil.PackageData["test-package"],
 	options: tarball.ExtractOptions{

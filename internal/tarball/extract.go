@@ -120,8 +120,8 @@ func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
 	// before the entry for the file itself. This is the case for .deb files but
 	// not for all tarballs.
 	tarDirMode := make(map[string]fs.FileMode)
-	// Regular files extracted by this package at their own path. A hard link
-	// is only created against one of these: anything else at the link target
+	// Entries extracted by this package at their own path. A hard link is
+	// only created against one of these: anything else at the link target
 	// came from another package.
 	extracted := make(map[string]bool)
 	tarReader := tar.NewReader(dataReader)
@@ -258,7 +258,7 @@ func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
 			if err != nil {
 				return err
 			}
-			if tarHeader.Typeflag == tar.TypeReg && targetPath == sourcePath {
+			if targetPath == sourcePath {
 				extracted[targetPath] = true
 			}
 		}
