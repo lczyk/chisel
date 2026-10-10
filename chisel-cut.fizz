@@ -6,70 +6,62 @@ options:
   crash_on_yield: false
 ---
 
-# chisel cut pipeline: setup.validate -> setup.Select -> Selection.Prefers ->
-# slicer.Run (extract, generate, mutate, removeAfterMutate, report).
+# chisel cut pipeline: setup.validate -> setup.Select -> Selection.Prefers -> slicer.Run (extract,
+# generate, mutate, removeAfterMutate, report).
 #
 # run:   fizz chisel-cut.fizz
-#        fizzbee 0.5.4 (https://github.com/fizzbee-io/fizzbee), from its brew
-#        tap or a release tarball. ~55k states, about a minute; prints PASSED
-#        or a counterexample trace. the run leaves an out/ dir and a
-#        chisel-cut.fizz.json next to this file.
+#        fizzbee 0.5.4 (https://github.com/fizzbee-io/fizzbee), from its brew tap or a release
+#        tarball. ~55k states, about a minute; prints PASSED or a counterexample trace. the run
+#        leaves an out/ dir and a chisel-cut.fizz.json next to this file.
 #
-# this is a transcription of the rule set in internal/slicer/slicer.go and
-# internal/setup/setup.go (chisel abb0ccc), not of the code: globs, hard links,
-# symlinks, modes, archives, stores and the manifest file itself are out.
-# the environment is the release (two packages, one slice each, three paths),
-# the host arch, the selection, and the orders go leaves open (selection order
-# among unrelated slices, go map iteration over generated paths).
+# this is a transcription of the rule set in internal/slicer/slicer.go and internal/setup/setup.go
+# (chisel abb0ccc), not of the code: globs, hard links, symlinks, modes, archives, stores and the
+# manifest file itself are out. the environment is the release (two packages, one slice each, three
+# paths), the host arch, the selection, and the orders go leaves open (selection order among
+# unrelated slices, go map iteration over generated paths).
 #
 # requirements (intent, not mechanism):
-# R1:  THE SYSTEM SHALL reject a release in which two packages list the same
-#      path with different content or both extract it, unless a prefer
-#      relationship picks one of them.
-# R2:  WHEN a selected slice lists a file for the host arch with no `until`,
-#      THE SYSTEM SHALL leave that file in the rootfs after the cut.
-# R3:  WHEN every selected slice that lists a path marks it `until: mutate`,
-#      THE SYSTEM SHALL remove the path after mutation scripts ran, a
-#      directory only once it is empty.
-# R4:  WHEN two selected packages list the same path and one is preferred,
-#      THE SYSTEM SHALL take the path from the preferred package.
-# R5:  THE SYSTEM SHALL list in the manifest every path left in the rootfs
-#      that a selected slice lists, attributed to each selected slice that
-#      lists it for the host arch and is not a prefer loser.
-# R6:  WHILE a release passed validation and every script only touches paths
-#      its slice may touch, THE SYSTEM SHALL complete the cut without error.
-# R7:  THE SYSTEM SHALL produce the same rootfs and manifest for the same
-#      release, arch and selection whatever internal order it processes in.
-# R8:  IF a directory is only ever created as the parent of some listed path,
-#      THEN THE SYSTEM SHALL keep it.
+# R1:  THE SYSTEM SHALL reject a release in which two packages list the same path with different
+#      content or both extract it, unless a prefer relationship picks one of them.
+# R2:  WHEN a selected slice lists a file for the host arch with no `until`, THE SYSTEM SHALL leave
+#      that file in the rootfs after the cut.
+# R3:  WHEN every selected slice that lists a path marks it `until: mutate`, THE SYSTEM SHALL remove
+#      the path after mutation scripts ran, a directory only once it is empty.
+# R4:  WHEN two selected packages list the same path and one is preferred, THE SYSTEM SHALL take the
+#      path from the preferred package.
+# R5:  THE SYSTEM SHALL list in the manifest every path left in the rootfs that a selected slice
+#      lists, attributed to each selected slice that lists it for the host arch and is not a prefer
+#      loser.
+# R6:  WHILE a release passed validation and every script only touches paths its slice may touch,
+#      THE SYSTEM SHALL complete the cut without error.
+# R7:  THE SYSTEM SHALL produce the same rootfs and manifest for the same release, arch and
+#      selection whatever internal order it processes in.
+# R8:  IF a directory is only ever created as the parent of some listed path, THEN THE SYSTEM SHALL
+#      keep it.
 #
-# findings (each confirmed with a go test against slicer.Run, then fixed in
-# the go code and in this model; the fixes are marked `FIX Fn` below, undo
-# one and the checker produces the trace):
-# F1: `mutable: true` + `until: mutate` on a path a script writes fails the
-#     cut in report.Mutate ("not previously added"); validate accepts it.
-#     fix: validate rejects the combination (no release branch uses it).
-# F2: Selection.Prefers ignores arch. when the preferred package lists the
-#     path for another arch only, nobody extracts it and the path is silently
-#     missing. fix: Selection carries Arch, Prefers skips other-arch listings.
-# F3: addKnownPath is first-write-wins, so a directory registered implicitly
-#     as a parent swallows a later explicit `until: mutate` listing. hit
-#     deterministically (extract before generate) and randomly (go map order
-#     over generated paths). fix: explicit listings override implicit ones.
-# F4 (decision, not fixed): generated content is attributed to every lister
-#     once the merged until is none, incl. the slice that said until: mutate;
-#     an upstream test pins this. the extraction branch attributes per slice
-#     instead (go test H5), so the two branches disagree. R5 follows the
+# findings (each confirmed with a go test against slicer.Run, then fixed in the go code and in this
+# model; the fixes are marked `FIX Fn` below, undo one and the checker produces the trace):
+# F1: `mutable: true` + `until: mutate` on a path a script writes fails the cut in report.Mutate
+#     ("not previously added"); validate accepts it. fix: validate rejects the combination (no
+#     release branch uses it).
+# F2: Selection.Prefers ignores arch. when the preferred package lists the path for another arch
+#     only, nobody extracts it and the path is silently missing. fix: Selection carries Arch,
+#     Prefers skips other-arch listings.
+# F3: addKnownPath is first-write-wins, so a directory registered implicitly as a parent swallows a
+#     later explicit `until: mutate` listing. hit deterministically (extract before generate) and
+#     randomly (go map order over generated paths). fix: explicit listings override implicit ones.
+# F4 (decision, not fixed): generated content is attributed to every lister once the merged until is
+#     none, incl. the slice that said until: mutate; an upstream test pins this. the extraction
+#     branch attributes per slice instead (go test H5), so the two branches disagree. R5 follows the
 #     tested rule; which branch is wrong is for chisel maintainers.
 #
 # decisions:
-# - a prefer loser is not attributed in the manifest (R5): the content is the
-#   preferred package's, so attributing the loser would mislead.
-# - scripts are fixed: a slice writes TEXT iff it lists TEXT as mutable, and
-#   reads FILE iff it lists FILE for the host arch. the reads/writes a script
-#   may do are an environment freedom; narrowed to keep the state space small.
-#   consequence: a write to a non-mutable path (a script author error, rejected
-#   by checkMutable) is never exercised, the m_write_non_mutable mutant passes.
+# - a prefer loser is not attributed in the manifest (R5): the content is the preferred package's,
+#   so attributing the loser would mislead.
+# - scripts are fixed: a slice writes TEXT iff it lists TEXT as mutable, and reads FILE iff it lists
+#   FILE for the host arch. the reads/writes a script may do are an environment freedom; narrowed to
+#   keep the state space small. consequence: a write to a non-mutable path (a script author error,
+#   rejected by checkMutable) is never exercised, the m_write_non_mutable mutant passes.
 
 DIR = "/d/"
 FILE = "/d/f"
@@ -82,8 +74,8 @@ UNTILS = [NONE, MUTATE]
 SLICES = ["Ps", "Qs"]
 PKG = {"Ps": "P", "Qs": "Q"}
 
-# per-slice per-path listing options. kind: copy (extracted from the deb),
-# make (directory created by chisel), text (file created by chisel).
+# per-slice per-path listing options. kind: copy (extracted from the deb), make (directory created
+# by chisel), text (file created by chisel).
 DIR_OPTS = [struct(kind="copy", until=NONE, mutable=False, arch="any", prefer=""),
             struct(kind="copy", until=MUTATE, mutable=False, arch="any", prefer=""),
             struct(kind="make", until=MUTATE, mutable=False, arch="any", prefer="")]
@@ -264,8 +256,8 @@ atomic action Select:
     phase = "EXTRACT"
 
 
-# tarball.Extract, one package per step in selection order. the deb carries
-# DIR then FILE (dirs precede their files in a deb data tarball).
+# tarball.Extract, one package per step in selection order. the deb carries DIR then FILE (dirs
+# precede their files in a deb data tarball).
 atomic action ExtractNext:
     require phase == "EXTRACT"
     if len(pending) == 0:
