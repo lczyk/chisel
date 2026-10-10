@@ -18,7 +18,8 @@ options:
 # (chisel abb0ccc), not of the code: globs, hard links, symlinks, modes, archives, stores and the
 # manifest file itself are out. the environment is the release (two packages, one slice each, three
 # paths), the host arch, the selection, and the orders go leaves open (selection order among
-# unrelated slices, go map iteration over generated paths).
+# unrelated slices, go map iteration over generated paths). scripts are fixed: a slice writes TEXT
+# iff it lists TEXT as mutable, and reads FILE iff it lists FILE for the host arch.
 #
 # requirements (intent, not mechanism):
 # R1:  THE SYSTEM SHALL reject a release in which two packages list the same path with different
@@ -38,31 +39,6 @@ options:
 #      selection whatever internal order it processes in.
 # R8:  IF a directory is only ever created as the parent of some listed path, THEN THE SYSTEM SHALL
 #      keep it.
-#
-# findings (each confirmed with a go test against slicer.Run, then fixed in the go code and in this
-# model; the fixes are marked `FIX Fn` below, undo one and the checker produces the trace):
-# F1: `mutable: true` + `until: mutate` on a path a script writes fails the cut in report.Mutate
-#     ("not previously added"); validate accepts it. fix: validate rejects the combination (no
-#     release branch uses it).
-# F2: Selection.Prefers ignores arch. when the preferred package lists the path for another arch
-#     only, nobody extracts it and the path is silently missing. fix: Selection carries Arch,
-#     Prefers skips other-arch listings.
-# F3: addKnownPath is first-write-wins, so a directory registered implicitly as a parent swallows a
-#     later explicit `until: mutate` listing. hit deterministically (extract before generate) and
-#     randomly (go map order over generated paths). fix: explicit listings override implicit ones.
-# F4 (decision, not fixed): generated content is attributed to every lister once the merged until is
-#     none, incl. the slice that said until: mutate; an upstream test pins this. the extraction
-#     branch attributes per slice instead (go test H5), so the two branches disagree. R5 follows the
-#     tested rule; which branch is wrong is for chisel maintainers.
-#
-# decisions:
-# - a prefer loser is not attributed in the manifest (R5): the content is the preferred package's,
-#   so attributing the loser would mislead.
-# - scripts are fixed: a slice writes TEXT iff it lists TEXT as mutable, and reads FILE iff it lists
-#   FILE for the host arch. the reads/writes a script may do are an environment freedom; narrowed to
-#   keep the state space small. consequence: a write to a non-mutable path (a script author error,
-#   rejected by checkMutable) is never exercised, the m_write_non_mutable mutant passes.
-
 DIR = "/d/"
 FILE = "/d/f"
 TEXT = "/d/t"
@@ -118,7 +94,7 @@ atomic func validate(rel):
         b = rel["Qs"].get(p, None)
         if b != None and b.prefer == "P" and rel["Ps"].get(p, None) == None:
             return "prefer target lacks " + p
-    # FIX F1: a path removed after mutate cannot be mutable
+    # a path removed after mutate cannot be mutable
     for s in SLICES:
         for p in [DIR, FILE, TEXT]:
             l = rel[s].get(p, None)
@@ -127,7 +103,7 @@ atomic func validate(rel):
     return ""
 
 
-# ---- Selection.Prefers (selected slices only, arch ignored) -----------------
+# ---- Selection.Prefers (selected slices only) -------------------------------
 
 atomic func prefers(rel, sel):
     out = {}
@@ -144,7 +120,7 @@ atomic func prefers(rel, sel):
             l = rel[s].get(p, None)
             if l == None:
                 continue
-            # FIX F2: a listing for another arch does not take part
+            # a listing for another arch does not take part
             if not (l.arch == "any" or l.arch == arch):
                 continue
             if chosen == "":
@@ -159,8 +135,8 @@ atomic func prefers(rel, sel):
 # ---- slicer.Run bookkeeping --------------------------------------------------
 
 atomic func add_known(path, data):
-    # addKnownPath: first write wins, parents get empty data
-    # FIX F3/H2: an explicit listing overrides an implicit parent entry
+    # addKnownPath: first write wins, except that an explicit listing overrides an implicit parent
+    # entry
     if path in known and not known[path].implicit:
         return
     known[path] = struct(until=data.until, mutable=data.mutable, implicit=False)
@@ -405,7 +381,7 @@ atomic func compute_expected():
         if provider != "" and has_none:
             efs[p] = provider
             erep[p] = attrib
-    # scripts (fixed, see decisions): the last writer in selection order wins
+    # scripts: the last writer in selection order wins
     for s in selection:
         info = release[s].get(TEXT, None)
         if info != None and info.mutable and TEXT in efs:
