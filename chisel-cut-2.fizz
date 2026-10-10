@@ -1,0 +1,551 @@
+---
+deadlock_detection: true
+options:
+  max_actions: 40
+  max_concurrent_actions: 1
+  crash_on_yield: false
+---
+
+# chisel cut pipeline, second model: globs, symlinks and hard links. chisel-cut.fizz, the first
+# model, has the shape and R1-R8; this one keeps that shape and adds the richer tarball below.
+#
+# run:   fizz chisel-cut-2.fizz
+#        fizzbee 0.5.4 (https://github.com/fizzbee-io/fizzbee), from its brew tap or a release
+#        tarball. ~95k states, a couple of minutes; prints PASSED or a counterexample trace. the
+#        run leaves an out/ dir and a chisel-cut-2.fizz.json next to this file.
+#
+# two packages P and Q, one slice each, fixed script shape, every selection and processing order,
+# as in chisel-cut.fizz. P's tarball carries DIR, FILE, LINK (a hard link to FILE) and SYM (a
+# symlink to FILE), in that order; Q's carries DIR and FILE. listings add a glob (`/d/**`), copying
+# the tar symlink, generating a symlink, and `mutable` on the hard link. arch is left to the first
+# model. still out: modes, archives, stores and the manifest file itself.
+#
+# requirements (intent, not mechanism), on top of R1-R8 of chisel-cut.fizz:
+# R9:  WHEN a selected slice lists a glob, THE SYSTEM SHALL extract every path of its package the
+#      glob matches, and attribute each of them to that slice.
+# R10: WHEN a selected slice lists a hard link entry of its package, THE SYSTEM SHALL leave a file
+#      with the content of that package's link target, whatever else is in the rootfs.
+# R11: WHEN a selected slice lists a symlink, copied or generated, THE SYSTEM SHALL leave a symlink
+#      with the listed target.
+# R12: IF a script writes to a path that is a hard link in the rootfs, THEN THE SYSTEM SHALL fail
+#      the cut (hard links cannot be mutated).
+
+DIR = "/d/"
+FILE = "/d/f"
+LINK = "/d/l"
+SYM = "/d/s"
+TEXT = "/d/t"
+GLOB = "/d/**"
+TAR_P = [DIR, FILE, LINK, SYM]
+TAR_Q = [DIR, FILE]
+ALL = [DIR, FILE, LINK, SYM, TEXT, GLOB]
+
+NONE = "none"
+MUTATE = "mutate"
+
+SLICES = ["Ps", "Qs"]
+PKG = {"Ps": "P", "Qs": "Q"}
+
+# listing options. kind: copy (extracted), glob (extracted, matches every tar path under DIR),
+# text (generated file), symlink (generated symlink to FILE). a copied SYM is a tar symlink to FILE.
+COPY_N = struct(kind="copy", until=NONE, mutable=False, prefer="")
+COPY_M = struct(kind="copy", until=MUTATE, mutable=False, prefer="")
+DIR_OPTS = [COPY_N, COPY_M]
+FILE_OPTS_P = [COPY_N, COPY_M]
+LINK_OPTS = [COPY_N, COPY_M, struct(kind="copy", until=NONE, mutable=True, prefer="")]
+SYM_OPTS = [COPY_N, COPY_M, struct(kind="symlink", until=NONE, mutable=False, prefer="")]
+GLOB_OPTS = [struct(kind="glob", until=NONE, mutable=False, prefer=""),
+             struct(kind="glob", until=MUTATE, mutable=False, prefer="")]
+TEXT_OPTS = [struct(kind="text", until=NONE, mutable=False, prefer=""),
+             struct(kind="text", until=NONE, mutable=True, prefer="")]
+FILE_OPTS_Q = [COPY_N, struct(kind="copy", until=NONE, mutable=False, prefer="P")]
+TEXT_OPTS_Q = [struct(kind="text", until=NONE, mutable=False, prefer="")]
+
+SELECTIONS = [["Ps"], ["Qs"], ["Ps", "Qs"], ["Qs", "Ps"]]
+
+
+atomic func pick(opts):
+    # index 0 means "not listed"
+    i = oneof range(len(opts) + 1)
+    if i == 0:
+        return None
+    return opts[i - 1]
+
+
+# ---- setup.validate ----------------------------------------------------------
+
+atomic func validate(rel):
+    # same path listed by both packages: same content, and never both extracted, unless a prefer
+    # relation exists
+    for p in ALL:
+        a = rel["Ps"].get(p, None)
+        b = rel["Qs"].get(p, None)
+        if a == None or b == None:
+            continue
+        if b.prefer == "P":
+            continue
+        same = (a.kind == b.kind and a.mutable == b.mutable)
+        if not same or a.kind == "copy" or a.kind == "glob":
+            return "conflict on " + p
+    # prefer target must contain the path
+    for p in ALL:
+        b = rel["Qs"].get(p, None)
+        if b != None and b.prefer == "P" and rel["Ps"].get(p, None) == None:
+            return "prefer target lacks " + p
+    # a path removed after mutate cannot be mutable
+    for s in SLICES:
+        for p in ALL:
+            l = rel[s].get(p, None)
+            if l != None and l.mutable and l.until == MUTATE:
+                return "mutable with until mutate on " + p
+    # conflict tree: a glob matches every other path under DIR. extracted content of the same
+    # package never conflicts; anything else does, prefer or not
+    g = rel["Ps"].get(GLOB, None)
+    if g != None:
+        for p in [DIR, FILE, LINK, SYM, TEXT]:
+            a = rel["Ps"].get(p, None)
+            if a != None and a.kind != "copy":
+                return "glob conflicts with generated " + p
+            b = rel["Qs"].get(p, None)
+            if b != None:
+                return "glob conflicts with Q on " + p
+    return ""
+
+
+# ---- Selection.Prefers (selected slices only) -------------------------------
+
+atomic func prefers(rel, sel):
+    out = {}
+    for p in ALL:
+        has_rel = False
+        for s in SLICES:
+            l = rel[s].get(p, None)
+            if l != None and l.prefer != "":
+                has_rel = True
+        if not has_rel:
+            continue
+        chosen = ""
+        for s in sel:
+            l = rel[s].get(p, None)
+            if l == None:
+                continue
+            if chosen == "":
+                chosen = PKG[s]
+            elif chosen != PKG[s]:
+                chosen = "P"   # the only relation in the model: Q prefers P
+        if chosen != "":
+            out[p] = chosen
+    return out
+
+
+# ---- slicer.Run bookkeeping --------------------------------------------------
+
+atomic func add_known(path, data):
+    # addKnownPath: first write wins, except that an explicit listing overrides an implicit parent
+    # entry
+    if path in known and not known[path].implicit:
+        return
+    known[path] = struct(until=data.until, mutable=data.mutable, hard=data.hard, implicit=False)
+    if not path.endswith("/"):
+        if DIR not in known:
+            known[DIR] = struct(until=NONE, mutable=False, hard=False, implicit=True)
+
+
+atomic func report_add(s, path):
+    if path not in report:
+        report[path] = {}
+    report[path][s] = True
+
+
+# the create callback of slicer.Run: entry already on disk, ctxs are the (slice, listing key)
+# pairs that asked for it, [] for an implicit parent. returns an error string.
+atomic func created(path, ctxs):
+    if len(ctxs) == 0:
+        return ""
+    until = MUTATE
+    mutable = False
+    for c in ctxs:
+        info = release[c.s][c.key]
+        mutable = mutable or info.mutable
+        if info.until == NONE:
+            until = NONE
+    hard = fs[path].kind == "hard"
+    # report.Add per lister, skipping until:mutate ones. a hard link needs its target in the report
+    for c in ctxs:
+        info = release[c.s][c.key]
+        if info.until == MUTATE:
+            continue
+        # a hard link whose target is not in the report is reported as a plain file
+        report_add(c.s, path)
+    add_known(path, struct(until=until, mutable=mutable, hard=hard))
+    return ""
+
+
+action Init:
+    phase = "NEW"
+    release = {"Ps": {}, "Qs": {}}
+    o = pick(DIR_OPTS)
+    if o != None:
+        release["Ps"][DIR] = o
+    o = pick(FILE_OPTS_P)
+    if o != None:
+        release["Ps"][FILE] = o
+    o = pick(LINK_OPTS)
+    if o != None:
+        release["Ps"][LINK] = o
+    o = pick(SYM_OPTS)
+    if o != None:
+        release["Ps"][SYM] = o
+    o = pick(GLOB_OPTS)
+    if o != None:
+        release["Ps"][GLOB] = o
+    o = pick(TEXT_OPTS)
+    if o != None:
+        release["Ps"][TEXT] = o
+    o = pick(FILE_OPTS_Q)
+    if o != None:
+        release["Qs"][FILE] = o
+    o = pick(TEXT_OPTS_Q)
+    if o != None:
+        release["Qs"][TEXT] = o
+    selection = []
+    prefer_map = {}
+    fs = {}
+    known = {}
+    report = {}
+    pending = []
+    cut_error = ""
+    expected_fs = {}
+    expected_report = {}
+    gen_groups = {}
+
+
+atomic action Validate:
+    require phase == "NEW"
+    err = validate(release)
+    if err != "":
+        phase = "INVALID"
+    else:
+        phase = "VALID"
+
+
+atomic action Select:
+    require phase == "VALID"
+    selection = oneof SELECTIONS
+    pm = prefers(release, selection)
+    prefer_map = pm
+    pending = list(selection)
+    phase = "EXTRACT"
+
+
+# tarball.Extract, one package per step in selection order, tar entries in tar order. the
+# contexts of an entry are the explicit listing and the glob, when they apply.
+atomic action ExtractNext:
+    require phase == "EXTRACT"
+    if cut_error != "":
+        phase = "DONE"
+        return
+    if len(pending) == 0:
+        pending = list(selection)
+        phase = "GENERATE_PLAN"
+        return
+    s = pending[0]
+    pending = pending[1:]
+    pkg = PKG[s]
+    tar = TAR_P
+    if pkg == "Q":
+        tar = TAR_Q
+    glob = release[s].get(GLOB, None)
+    has_generated = False
+    for p in release[s]:
+        k = release[s][p].kind
+        if k == "text" or k == "symlink":
+            has_generated = True
+    made = {}
+    for p in tar:
+        ctxs = []
+        l = release[s].get(p, None)
+        if l != None and l.kind == "copy":
+            if not (p in prefer_map and prefer_map[p] != pkg):
+                ctxs = ctxs + [struct(s=s, key=p)]
+        if glob != None:
+            ctxs = ctxs + [struct(s=s, key=GLOB)]
+        if len(ctxs) == 0:
+            if p == DIR and has_generated:
+                # optional parent of generated content, no context
+                fs[DIR] = struct(kind="dir", content="", target="")
+            continue
+        if p != DIR and DIR not in fs:
+            # parent from tarDirMode, no context
+            fs[DIR] = struct(kind="dir", content="", target="")
+        if p == DIR:
+            fs[DIR] = struct(kind="dir", content="", target="")
+        elif p == FILE:
+            fs[FILE] = struct(kind="file", content=pkg, target="")
+            made[FILE] = True
+        elif p == SYM:
+            fs[SYM] = struct(kind="sym", content="", target=FILE)
+        elif p == LINK:
+            # os.Link only against a target this package extracted in this pass
+            if FILE in made:
+                fs[LINK] = struct(kind="hard", content=fs[FILE].content, target="")
+            else:
+                # second pass: the content of this package's target, as a plain file
+                fs[LINK] = struct(kind="file", content=pkg, target="")
+        err = created(p, ctxs)
+        if err != "":
+            cut_error = "slice " + s + ": " + err
+            return
+
+
+# generated content: group by path, then go iterates the map in random order
+atomic action GeneratePlan:
+    require phase == "GENERATE_PLAN"
+    groups = {}
+    for s in selection:
+        for p in release[s]:
+            info = release[s][p]
+            if info.kind == "copy" or info.kind == "glob":
+                continue
+            if p in prefer_map and prefer_map[p] != PKG[s]:
+                continue
+            if p not in groups:
+                groups[p] = []
+            groups[p] = groups[p] + [s]
+    gen_groups = groups
+    pending = list(groups.keys())
+    phase = "GENERATE"
+
+
+atomic action GenerateNext:
+    require phase == "GENERATE"
+    if len(pending) == 0:
+        pending = list(selection)
+        phase = "MUTATE"
+        return
+    p = oneof pending
+    pending = [x for x in pending if x != p]
+    listers = gen_groups[p]
+    until = MUTATE
+    for s in listers:
+        if release[s][p].until == NONE:
+            until = NONE
+    first = release[listers[0]][p]
+    add_known(p, struct(until=until, mutable=first.mutable, hard=False))
+    if DIR not in fs:
+        fs[DIR] = struct(kind="dir", content="", target="")   # MakeParents
+    if first.kind == "text":
+        fs[p] = struct(kind="file", content="text", target="")
+    else:
+        fs[p] = struct(kind="sym", content="", target=FILE)
+    for s in listers:
+        if release[s][p].until != MUTATE:
+            report_add(s, p)
+
+
+atomic action MutateNext:
+    require phase == "MUTATE"
+    if len(pending) == 0:
+        phase = "REMOVE"
+        return
+    s = pending[0]
+    pending = pending[1:]
+    if cut_error != "":
+        return
+    if FILE in release[s] and release[s][FILE].kind == "copy":
+        # content.read(FILE): checkKnown
+        if FILE not in known:
+            cut_error = "slice " + s + ": cannot read file which is not selected: " + FILE
+            return
+    for w in [TEXT, LINK]:
+        if w in release[s] and release[s][w].mutable:
+            # content.write(w, ...): checkMutable then report.Mutate
+            if w not in known or not known[w].mutable:
+                cut_error = "slice " + s + ": cannot write file which is not mutable: " + w
+                return
+            if known[w].hard:
+                cut_error = "slice " + s + ": cannot mutate a hard link: " + w
+                return
+            fs[w] = struct(kind="file", content="w:" + s, target="")
+            if w not in report:
+                cut_error = "slice " + s + ": cannot mutate path in report: " + w + " not previously added"
+                return
+
+
+atomic action RemoveAfterMutate:
+    require phase == "REMOVE"
+    if cut_error == "":
+        for p in [FILE, LINK, SYM, TEXT]:
+            if p in known and known[p].until == MUTATE and p in fs:
+                fs.pop(p)
+        if DIR in known and known[DIR].until == MUTATE and DIR in fs:
+            empty = True
+            for p in [FILE, LINK, SYM, TEXT]:
+                if p in fs:
+                    empty = False
+            if empty:
+                fs.pop(DIR)
+    e = compute_expected()
+    expected_fs = e.fs
+    expected_report = e.report
+    phase = "DONE"
+
+
+# the listings of slice s that cover path p after prefer: the explicit one and the glob
+atomic func covering(s, p):
+    out = []
+    l = release[s].get(p, None)
+    if l != None and not (p in prefer_map and prefer_map[p] != PKG[s]):
+        out = out + [l]
+    g = release[s].get(GLOB, None)
+    if g != None and p != TEXT:
+        out = out + [g]
+    return out
+
+
+atomic func compute_expected():
+    efs = {}
+    erep = {}
+    for p in [FILE, LINK, SYM, TEXT]:
+        provider = ""
+        has_none = False
+        attrib = {}
+        for s in selection:
+            ls = covering(s, p)
+            if len(ls) == 0:
+                continue
+            provider = PKG[s]
+            attrib_s = False
+            for l in ls:
+                if l.until == NONE:
+                    has_none = True
+                    attrib_s = True
+            if attrib_s:
+                attrib[s] = True
+        if provider == "" or not has_none:
+            continue
+        if p == FILE:
+            efs[p] = struct(kind="file", content=provider, target="")
+        elif p == LINK:
+            # R10: the content of its own package's target, hard link or not
+            efs[p] = struct(kind="file", content="P", target="")
+        elif p == SYM:
+            efs[p] = struct(kind="sym", content="", target=FILE)
+        else:
+            efs[p] = struct(kind="file", content="text", target="")
+        erep[p] = attrib
+    # scripts: the last writer in selection order wins
+    for s in selection:
+        for w in [TEXT, LINK]:
+            info = release[s].get(w, None)
+            if info != None and info.mutable and w in efs:
+                efs[w] = struct(kind="file", content="w:" + s, target="")
+    # directory (R3, R8)
+    listed = False
+    listed_none = False
+    child_created = False
+    attrib = {}
+    for s in selection:
+        ds = covering(s, DIR)
+        for l in ds:
+            listed = True
+            if l.until == NONE:
+                listed_none = True
+                attrib[s] = True
+        for p in [FILE, LINK, SYM, TEXT]:
+            cs = covering(s, p)
+            if len(cs) > 0:
+                child_created = True
+    child_present = False
+    for p in [FILE, LINK, SYM, TEXT]:
+        if p in efs:
+            child_present = True
+    if listed_none or child_present or (child_created and not listed):
+        efs[DIR] = struct(kind="dir", content="", target="")
+    if listed_none:
+        erep[DIR] = attrib
+    return struct(fs=efs, report=erep)
+
+
+atomic action NoOp:
+    require phase == "DONE" or phase == "INVALID"
+    pass
+
+
+# ---- properties --------------------------------------------------------------
+
+always assertion RootfsMatchesIntent:     # R2 R3 R4 R7 R8 R9 R10 R11
+    if phase != "DONE" or cut_error != "":
+        return True
+    for p in expected_fs:
+        if p not in fs:
+            return False
+        e = expected_fs[p]
+        a = fs[p]
+        if p == LINK:
+            # hard link or plain file, the content is what matters
+            if a.content != e.content:
+                return False
+        elif a.kind != e.kind or a.content != e.content or a.target != e.target:
+            return False
+    for p in fs:
+        if p not in expected_fs:
+            return False
+    return True
+
+
+always assertion ManifestMatchesIntent:   # R5 R7 R9
+    if phase != "DONE" or cut_error != "":
+        return True
+    for p in expected_report:
+        if p not in report:
+            return False
+        for s in expected_report[p]:
+            if s not in report[p]:
+                return False
+        for s in report[p]:
+            if s not in expected_report[p]:
+                return False
+    for p in report:
+        if p not in expected_report:
+            return False
+    return True
+
+
+always assertion ValidReleaseCuts:        # R6 R12
+    if phase != "DONE":
+        return True
+    if cut_error == "":
+        return True
+    # R12: the one failure by design, a script writing a hard link
+    for s in selection:
+        l = release[s].get(LINK, None)
+        if l != None and l.mutable and cut_error == "slice " + s + ": cannot mutate a hard link: " + LINK:
+            return True
+    return False
+
+
+always assertion HardLinkWriteRejected:   # R12
+    if phase != "DONE":
+        return True
+    for s in selection:
+        l = release[s].get(LINK, None)
+        if l != None and l.mutable and LINK in known and known[LINK].hard:
+            return cut_error == "slice " + s + ": cannot mutate a hard link: " + LINK
+    return True
+
+
+exists assertion GlobExtracted:
+    return phase == "DONE" and cut_error == "" and GLOB in release["Ps"] and "Ps" in selection and LINK in fs
+
+
+exists assertion HardLinkMade:
+    return phase == "DONE" and LINK in fs and fs[LINK].kind == "hard"
+
+
+exists assertion SymlinkGenerated:
+    return phase == "DONE" and SYM in fs and SYM in release["Ps"] and release["Ps"][SYM].kind == "symlink"
+
+
+exists assertion LinkRemoved:
+    return phase == "DONE" and LINK in known and LINK not in fs
