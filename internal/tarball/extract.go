@@ -120,6 +120,10 @@ func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
 	// before the entry for the file itself. This is the case for .deb files but
 	// not for all tarballs.
 	tarDirMode := make(map[string]fs.FileMode)
+	// Regular files extracted by this package at their own path. A hard link
+	// is only created against one of these: anything else at the link target
+	// came from another package.
+	extracted := make(map[string]bool)
 	tarReader := tar.NewReader(dataReader)
 	for {
 		tarHeader, err := tarReader.Next()
@@ -221,6 +225,21 @@ func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
 			}
 			link := tarHeader.Linkname
 			if tarHeader.Typeflag == tar.TypeLink {
+				relLinkPath, ok := sanitizeTarPath(tarHeader.Linkname)
+				if !ok {
+					return fmt.Errorf("invalid link target %s", tarHeader.Linkname)
+				}
+				if !extracted[relLinkPath] {
+					// The content was not extracted previously, so the
+					// hard link entry is extracted later with its own
+					// content.
+					info := pendingHardLink{
+						path:         targetPath,
+						extractInfos: extractInfos,
+					}
+					pendingHardLinks[relLinkPath] = append(pendingHardLinks[relLinkPath], info)
+					continue
+				}
 				// A hard link requires the real path of the target file.
 				link = filepath.Join(options.TargetDir, link)
 			}
@@ -236,21 +255,11 @@ func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
 				OverrideMode: true,
 			}
 			err := options.Create(extractInfos, createOptions)
-			if err != nil && os.IsNotExist(err) && tarHeader.Typeflag == tar.TypeLink {
-				// The hard link could not be created because the content
-				// was not extracted previously. Add this hard link entry
-				// to the pending list to extract later.
-				relLinkPath, ok := sanitizeTarPath(tarHeader.Linkname)
-				if !ok {
-					return fmt.Errorf("invalid link target %s", tarHeader.Linkname)
-				}
-				info := pendingHardLink{
-					path:         targetPath,
-					extractInfos: extractInfos,
-				}
-				pendingHardLinks[relLinkPath] = append(pendingHardLinks[relLinkPath], info)
-			} else if err != nil {
+			if err != nil {
 				return err
+			}
+			if tarHeader.Typeflag == tar.TypeReg && targetPath == sourcePath {
+				extracted[targetPath] = true
 			}
 		}
 	}
