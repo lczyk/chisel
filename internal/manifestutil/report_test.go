@@ -318,6 +318,17 @@ var reportTests = []struct {
 		},
 	},
 }, {
+	summary: "Hard link without content to a target that is not in the report",
+	add: []sliceAndEntry{{
+		entry: fsutil.Entry{
+			Path: "/base/example-hard-link",
+			Mode: 0777,
+			Link: "/base/example-symlink",
+		},
+		slice: oneSlice,
+	}},
+	err: `cannot add hard link /example-hard-link to report: target /example-symlink not previously added`,
+}, {
 	summary: "Multiple hard links groups",
 	add: []sliceAndEntry{{
 		entry: sampleFile,

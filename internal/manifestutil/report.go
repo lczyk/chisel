@@ -73,11 +73,14 @@ func (r *Report) Add(slice *setup.Slice, fsEntry *fsutil.Entry) error {
 			fsEntryCpy.SHA256 = entry.SHA256
 			fsEntryCpy.Size = entry.Size
 			fsEntryCpy.Link = entry.Link
-		} else {
+		} else if fsEntry.SHA256 != "" {
 			// The target is not in the report, for instance because it is
 			// listed with "until: mutate", so the link is reported as a
 			// regular file with its own content.
 			fsEntryCpy.Link = ""
+		} else {
+			// A hard link to a symlink carries no content of its own.
+			return fmt.Errorf("cannot add hard link %s to report: target %s not previously added", relPath, relLinkPath)
 		}
 	}
 

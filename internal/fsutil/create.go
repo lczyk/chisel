@@ -82,6 +82,11 @@ func Create(options *CreateOptions) (*Entry, error) {
 				info, err = os.Lstat(path)
 				if err == nil && info.Mode().IsRegular() {
 					hash, size, err = hashFile(path)
+					if os.IsPermission(err) {
+						// The content is not readable, so the entry has no
+						// hash of its own.
+						hash, size, err = "", 0, nil
+					}
 				}
 			}
 		} else {
