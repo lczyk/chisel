@@ -455,6 +455,50 @@ var slicerTests = []slicerTest{{
 		"/foo/text-file-2": "file 0644 d98cf53e 5b41362b {test-package_myslice}",
 	},
 }, {
+	summary: "Copied file and directory take the listed mode",
+	slices:  []setup.SliceKey{{"test-package", "myslice"}},
+	release: map[string]string{
+		"slices/mydir/test-package.yaml": `
+			package: test-package
+			slices:
+				myslice:
+					contents:
+						/dir/: {mode: 0700}
+						/dir/file: {mode: 0600}
+						/other-dir/file-copy: {copy: /dir/file, mode: 0640}
+		`,
+	},
+	filesystem: map[string]string{
+		"/dir/":                "dir 0700",
+		"/dir/file":            "file 0600 cc55e2ec",
+		"/other-dir/":          "dir 0755",
+		"/other-dir/file-copy": "file 0640 cc55e2ec",
+	},
+	manifestPaths: map[string]string{
+		"/dir/":                "dir 0700 {test-package_myslice}",
+		"/dir/file":            "file 0600 cc55e2ec {test-package_myslice}",
+		"/other-dir/file-copy": "file 0640 cc55e2ec {test-package_myslice}",
+	},
+}, {
+	summary: "Listed mode on a path a glob also matches is a diverging mode",
+	slices: []setup.SliceKey{
+		{"test-package", "myslice1"},
+		{"test-package", "myslice2"},
+	},
+	release: map[string]string{
+		"slices/mydir/test-package.yaml": `
+			package: test-package
+			slices:
+				myslice1:
+					contents:
+						/dir/fil*:
+				myslice2:
+					contents:
+						/dir/file: {mode: 0600}
+		`,
+	},
+	error: `cannot extract from package "test-package": path /dir/file requested twice with diverging mode: 0600 != 0000`,
+}, {
 	summary: "Script: use 'until' to remove file after mutate",
 	slices:  []setup.SliceKey{{"test-package", "myslice"}},
 	release: map[string]string{
