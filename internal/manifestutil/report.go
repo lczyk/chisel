@@ -63,19 +63,22 @@ func (r *Report) Add(slice *setup.Slice, fsEntry *fsutil.Entry) error {
 	if fsEntry.Mode.IsRegular() && fsEntry.Link != "" {
 		// Hard link.
 		relLinkPath, _ := r.sanitizeAbsPath(fsEntry.Link, false)
-		entry, ok := r.Entries[relLinkPath]
-		if !ok {
-			return fmt.Errorf("cannot add hard link %s to report: target %s not previously added", relPath, relLinkPath)
+		if entry, ok := r.Entries[relLinkPath]; ok {
+			if entry.Inode == 0 {
+				r.lastInode += 1
+				entry.Inode = r.lastInode
+				r.Entries[relLinkPath] = entry
+			}
+			inode = entry.Inode
+			fsEntryCpy.SHA256 = entry.SHA256
+			fsEntryCpy.Size = entry.Size
+			fsEntryCpy.Link = entry.Link
+		} else {
+			// The target is not in the report, for instance because it is
+			// listed with "until: mutate", so the link is reported as a
+			// regular file with its own content.
+			fsEntryCpy.Link = ""
 		}
-		if entry.Inode == 0 {
-			r.lastInode += 1
-			entry.Inode = r.lastInode
-			r.Entries[relLinkPath] = entry
-		}
-		inode = entry.Inode
-		fsEntryCpy.SHA256 = entry.SHA256
-		fsEntryCpy.Size = entry.Size
-		fsEntryCpy.Link = entry.Link
 	}
 
 	if entry, ok := r.Entries[relPath]; ok {

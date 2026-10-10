@@ -297,6 +297,27 @@ var reportTests = []struct {
 		},
 	},
 }, {
+	summary: "Hard link to a target that is not in the report",
+	add: []sliceAndEntry{{
+		entry: fsutil.Entry{
+			Path:   "/base/example-hard-link",
+			Mode:   0777,
+			SHA256: "example-file_hash",
+			Size:   5678,
+			Link:   "/base/example-file",
+		},
+		slice: oneSlice,
+	}},
+	expected: map[string]manifestutil.ReportEntry{
+		"/example-hard-link": {
+			Path:   "/example-hard-link",
+			Mode:   0777,
+			SHA256: "example-file_hash",
+			Size:   5678,
+			Slices: map[*setup.Slice]bool{oneSlice: true},
+		},
+	},
+}, {
 	summary: "Multiple hard links groups",
 	add: []sliceAndEntry{{
 		entry: sampleFile,
