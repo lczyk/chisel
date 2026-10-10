@@ -479,24 +479,6 @@ var slicerTests = []slicerTest{{
 		"/foo/text-file-2": "file 0644 d98cf53e 5b41362b {test-package_myslice}",
 	},
 }, {
-	summary: "Script: write to a mutable path with 'until' set to mutate",
-	slices:  []setup.SliceKey{{"test-package", "myslice"}},
-	release: map[string]string{
-		"slices/mydir/test-package.yaml": `
-			package: test-package
-			slices:
-				myslice:
-					contents:
-						/dir/text-file: {text: data1, mutable: true, until: mutate}
-					mutate: |
-						content.write("/dir/text-file", "data2")
-		`,
-	},
-	filesystem: map[string]string{
-		"/dir/": "dir 0755",
-	},
-	manifestPaths: map[string]string{},
-}, {
 	summary: "Script: use 'until' to remove wildcard after mutate",
 	slices:  []setup.SliceKey{{"test-package", "myslice"}},
 	release: map[string]string{

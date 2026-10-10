@@ -327,14 +327,7 @@ func Run(options *RunOptions) error {
 		RootDir:    targetDir,
 		CheckWrite: checker.checkMutable,
 		CheckRead:  checker.checkKnown,
-		OnWrite: func(entry *fsutil.Entry) error {
-			// Paths with "until: mutate" are not in the report.
-			relPath := filepath.Clean("/" + strings.TrimPrefix(entry.Path, targetDir))
-			if knownPaths[relPath].until == setup.UntilMutate {
-				return nil
-			}
-			return report.Mutate(entry)
-		},
+		OnWrite:    report.Mutate,
 	}
 	for _, slice := range options.Selection.Slices {
 		opts := scripts.RunOptions{
