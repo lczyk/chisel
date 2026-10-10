@@ -10,10 +10,10 @@ options:
 # slicer.Run (extract, generate, mutate, removeAfterMutate, report).
 #
 # run:   fizz chisel-cut.fizz
-#        (fizzbee 0.5.4, from the fizzbee-io/fizzbee brew tap or a release at
-#        https://github.com/fizzbee-io/fizzbee/releases. ~55k states, a
-#        minutes; prints PASSED or a counterexample trace. the run leaves an
-#        out/ dir and a chisel-cut.fizz.json next to this file.)
+#        fizzbee 0.5.4 (https://github.com/fizzbee-io/fizzbee), from its brew
+#        tap or a release tarball. ~55k states, about a minute; prints PASSED
+#        or a counterexample trace. the run leaves an out/ dir and a
+#        chisel-cut.fizz.json next to this file.
 #
 # this is a transcription of the rule set in internal/slicer/slicer.go and
 # internal/setup/setup.go (chisel abb0ccc), not of the code: globs, hard links,
