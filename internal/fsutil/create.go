@@ -75,10 +75,14 @@ func Create(options *CreateOptions) (*Entry, error) {
 			}
 			err = createHardLink(o)
 			if err == nil {
-				// The content is the target's, so hash it from disk. The
-				// entry can then stand on its own if the target is not
-				// reported.
-				hash, size, err = hashFile(path)
+				// A link to a regular file carries that content, so hash it
+				// from disk and the entry can stand on its own if the target
+				// is not reported. A link to a symlink has no content.
+				var info fs.FileInfo
+				info, err = os.Lstat(path)
+				if err == nil && info.Mode().IsRegular() {
+					hash, size, err = hashFile(path)
+				}
 			}
 		} else {
 			err = createFile(o)
