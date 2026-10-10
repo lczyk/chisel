@@ -180,19 +180,17 @@ func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
 		}
 
 		var pathReader io.Reader = tarReader
+		tarMode := tarHeader.Mode
 		for targetPath, extractInfos := range targetPaths {
 			if contentIsCached {
 				pathReader = bytes.NewReader(contentCache)
 			}
-			mode := extractInfos[0].Mode
-			for _, extractInfo := range extractInfos {
-				if extractInfo.Mode != mode {
-					if mode < extractInfo.Mode {
-						mode, extractInfo.Mode = extractInfo.Mode, mode
-					}
-					return fmt.Errorf("path %s requested twice with diverging mode: 0%03o != 0%03o", targetPath, mode, extractInfo.Mode)
-				}
+			mode, err := listedMode(targetPath, extractInfos)
+			if err != nil {
+				return err
 			}
+			// Each target starts from the mode in the tarball.
+			tarHeader.Mode = tarMode
 			if mode != 0 {
 				tarHeader.Mode = int64(mode)
 			}
@@ -235,7 +233,7 @@ func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
 				MakeParents:  true,
 				OverrideMode: true,
 			}
-			err := options.Create(extractInfos, createOptions)
+			err = options.Create(extractInfos, createOptions)
 			if err != nil && os.IsNotExist(err) && tarHeader.Typeflag == tar.TypeLink {
 				// The hard link could not be created because the content
 				// was not extracted previously. Add this hard link entry
@@ -251,6 +249,10 @@ func extractData(pkgReader io.ReadSeeker, options *ExtractOptions) error {
 				pendingHardLinks[relLinkPath] = append(pendingHardLinks[relLinkPath], info)
 			} else if err != nil {
 				return err
+			} else if tarHeader.Typeflag == tar.TypeLink && mode != 0 {
+				// The link shares its inode with the target, so a mode of
+				// its own cannot be honoured.
+				return fmt.Errorf("path %s is a hard link and cannot have its own mode 0%03o", targetPath, mode)
 			}
 		}
 	}
@@ -332,6 +334,14 @@ func extractHardLinks(pkgReader io.ReadSeeker, opts *extractHardLinkOptions) err
 		// created file as their target.
 		absLink := filepath.Join(opts.TargetDir, links[0].path)
 		// Extract the content to the first hard link path.
+		var mode uint
+		mode, err = listedMode(links[0].path, links[0].extractInfos)
+		if err != nil {
+			return err
+		}
+		if mode != 0 {
+			tarHeader.Mode = int64(mode)
+		}
 		createOptions := &fsutil.CreateOptions{
 			Root: opts.TargetDir,
 			Path: links[0].path,
@@ -345,6 +355,13 @@ func extractHardLinks(pkgReader io.ReadSeeker, opts *extractHardLinkOptions) err
 
 		// Create the remaining hard links.
 		for _, link := range links[1:] {
+			mode, err = listedMode(link.path, link.extractInfos)
+			if err != nil {
+				return err
+			}
+			if mode != 0 {
+				return fmt.Errorf("path %s is a hard link and cannot have its own mode 0%03o", link.path, mode)
+			}
 			createOptions := &fsutil.CreateOptions{
 				Root: opts.TargetDir,
 				Path: link.path,
@@ -373,6 +390,20 @@ func extractHardLinks(pkgReader io.ReadSeeker, opts *extractHardLinkOptions) err
 	}
 
 	return nil
+}
+
+// listedMode returns the mode the extract infos ask for, 0 when none does.
+func listedMode(targetPath string, extractInfos []ExtractInfo) (uint, error) {
+	mode := extractInfos[0].Mode
+	for _, extractInfo := range extractInfos {
+		if extractInfo.Mode != mode {
+			if mode < extractInfo.Mode {
+				mode, extractInfo.Mode = extractInfo.Mode, mode
+			}
+			return 0, fmt.Errorf("path %s requested twice with diverging mode: 0%03o != 0%03o", targetPath, mode, extractInfo.Mode)
+		}
+	}
+	return mode, nil
 }
 
 func parentDirs(path string) []string {

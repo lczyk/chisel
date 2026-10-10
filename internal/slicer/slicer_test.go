@@ -480,6 +480,75 @@ var slicerTests = []slicerTest{{
 		"/other-dir/file-copy": "file 0640 cc55e2ec {test-package_myslice}",
 	},
 }, {
+	summary: "Same source copied twice, listed mode applies to one destination only",
+	slices:  []setup.SliceKey{{"test-package", "myslice"}},
+	release: map[string]string{
+		"slices/mydir/test-package.yaml": `
+			package: test-package
+			slices:
+				myslice:
+					contents:
+						/copy-a: {copy: /dir/file, mode: 0600}
+						/copy-b: {copy: /dir/file}
+		`,
+	},
+	filesystem: map[string]string{
+		"/copy-a": "file 0600 cc55e2ec",
+		"/copy-b": "file 0644 cc55e2ec",
+	},
+	manifestPaths: map[string]string{
+		"/copy-a": "file 0600 cc55e2ec {test-package_myslice}",
+		"/copy-b": "file 0644 cc55e2ec {test-package_myslice}",
+	},
+}, {
+	summary: "Hard link extracted on its own takes the listed mode",
+	slices:  []setup.SliceKey{{"test-package", "myslice"}},
+	pkgs: []*testutil.TestPackage{{
+		Name: "test-package",
+		Data: testutil.MustMakeDeb([]testutil.TarEntry{
+			testutil.Dir(0755, "./"),
+			testutil.Reg(0644, "./file", "foo"),
+			testutil.Hrd(0644, "./hardlink", "./file"),
+		}),
+	}},
+	release: map[string]string{
+		"slices/mydir/test-package.yaml": `
+			package: test-package
+			slices:
+				myslice:
+					contents:
+						/hardlink: {mode: 0600}
+		`,
+	},
+	filesystem: map[string]string{
+		"/hardlink": "file 0600 2c26b46b",
+	},
+	manifestPaths: map[string]string{
+		"/hardlink": "file 0600 2c26b46b {test-package_myslice}",
+	},
+}, {
+	summary: "Hard link sharing its target's inode cannot have its own mode",
+	slices:  []setup.SliceKey{{"test-package", "myslice"}},
+	pkgs: []*testutil.TestPackage{{
+		Name: "test-package",
+		Data: testutil.MustMakeDeb([]testutil.TarEntry{
+			testutil.Dir(0755, "./"),
+			testutil.Reg(0644, "./file", "foo"),
+			testutil.Hrd(0644, "./hardlink", "./file"),
+		}),
+	}},
+	release: map[string]string{
+		"slices/mydir/test-package.yaml": `
+			package: test-package
+			slices:
+				myslice:
+					contents:
+						/file:
+						/hardlink: {mode: 0600}
+		`,
+	},
+	error: `cannot extract from package "test-package": path /hardlink is a hard link and cannot have its own mode 0600`,
+}, {
 	summary: "Listed mode on a path a glob also matches is a diverging mode",
 	slices: []setup.SliceKey{
 		{"test-package", "myslice1"},
